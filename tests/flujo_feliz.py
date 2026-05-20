@@ -1,86 +1,79 @@
-import sys
 import os
+import sys
+import tempfile
 import time
 sys.path.insert(0, os.path.dirname(__file__))
-from helper import arrancar_sistema, conectar_cliente, enviar, apagar
+from helper import arrancar_sistema, conectar_cliente, pedir, apagar
+
+# programa que ordena las lineas de stdin (cross-platform)
+SORT = "import sys; sys.stdout.write(''.join(sorted(sys.stdin.readlines())))"
 
 
-def check(label, r, estado_esperado="ok"):
-    bien = r.get("estado") == estado_esperado
-    marca = "OK  " if bien else "FALLO"
+def check(label, r, esperado="ok"):
+    marca = "OK  " if r.get("estado") == esperado else "FALLO"
     print(f"  [{marca}] {label}: {r}")
-    return bien
 
 
 def main():
     print("=== Test: Flujo Feliz Completo ===\n")
     procs = arrancar_sistema()
-    req, res = conectar_cliente()
+    con = conectar_cliente()
 
-    # 1. Crear fichero de entrada
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Crear"})
+    # 1. fichero de entrada
+    r = pedir(con, {"servicio": "gesfich", "operacion": "Crear"})
     check("Crear fichero entrada", r)
     id_entrada = r["id-fichero"]
 
-    # 2. Escribir contenido desordenado en el fichero de entrada
-    contenido = "banana\nmanzana\ncereza\narándano\n"
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Actualizar",
-                           "id-fichero": id_entrada, "contenido": contenido})
-    check("Escribir contenido en entrada", r)
+    # 2. volcar contenido desordenado desde un archivo del disco
+    fuente = os.path.join(tempfile.gettempdir(), "fuente_flujo.txt")
+    with open(fuente, "w", encoding="utf-8") as f:
+        f.write("banana\nmanzana\ncereza\narandano\n")
+    r = pedir(con, {"servicio": "gesfich", "operacion": "Actualizar",
+                    "id-fichero": id_entrada, "ruta": fuente})
+    check("Actualizar entrada desde archivo", r)
 
-    # 3. Crear fichero de salida vacío
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Crear"})
+    # 3. fichero de salida
+    r = pedir(con, {"servicio": "gesfich", "operacion": "Crear"})
     check("Crear fichero salida", r)
     id_salida = r["id-fichero"]
 
-    # 4. Registrar programa /usr/bin/sort
-    r = enviar(req, res, {"servicio": "gesprog", "operacion": "Guardar",
-                           "ejecutable": "/usr/bin/sort", "argumentos": [], "ambiente": {}})
+    # 4. registrar el programa de ordenamiento
+    r = pedir(con, {"servicio": "gesprog", "operacion": "Guardar",
+                    "ejecutable": sys.executable, "args": ["-c", SORT], "env": []})
     check("Guardar programa sort", r)
     id_prog = r["id-programa"]
 
-    # 5. Listar para verificar que están registrados
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Listar"})
+    # 5. listar (Leer/Estado sin id)
+    r = pedir(con, {"servicio": "gesfich", "operacion": "Leer"})
     check("Listar ficheros", r)
     print(f"         Ficheros: {r.get('ficheros')}")
-
-    r = enviar(req, res, {"servicio": "gesprog", "operacion": "Listar"})
+    r = pedir(con, {"servicio": "gesprog", "operacion": "Leer"})
     check("Listar programas", r)
     print(f"         Programas: {r.get('programas')}")
 
-    # 6. Ejecutar: sort lee de entrada y escribe en salida
-    r = enviar(req, res, {"servicio": "ejecutor", "operacion": "Ejecutar",
-                           "id-programa": id_prog, "stdin": id_entrada, "stdout": id_salida})
+    # 6. ejecutar
+    r = pedir(con, {"servicio": "ejecutor", "operacion": "Ejecutar",
+                    "id-programa": id_prog, "stdin": id_entrada, "stdout": id_salida})
     check("Ejecutar proceso", r)
     id_e = r["id-ejecucion"]
-    print(f"         ID ejecucion: {id_e}")
 
-    # 7. Consultar estado inmediato (puede ser Ejecutando o Terminado)
-    r = enviar(req, res, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": id_e})
-    check("Estado inmediato", r)
-    print(f"         Estado: {r.get('estado-proceso')}")
-
-    # 8. Esperar y volver a consultar
+    # 7-8. estado
+    r = pedir(con, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": id_e})
+    print(f"         Estado inmediato: {r.get('proceso-estado')}")
     time.sleep(1)
-    r = enviar(req, res, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": id_e})
-    check("Estado tras 1s (esperado: Terminado)", r)
-    print(f"         Estado: {r.get('estado-proceso')}, codigo-salida: {r.get('codigo-salida')}")
+    r = pedir(con, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": id_e})
+    check("Estado tras 1s", r)
+    print(f"         Estado: {r.get('proceso-estado')}, codigo-salida: {r.get('codigo-salida')}")
 
-    # 9. Leer fichero de salida y verificar que está ordenado
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Leer", "id-fichero": id_salida})
-    check("Leer fichero salida", r)
-    salida = r.get("contenido", "")
-    print(f"\n  Entrada:  {contenido.strip()}")
-    print(f"  Salida:   {salida.strip()}")
-    esperado = "arándano\nbanana\ncereza\nmanzana"
-    if salida.strip() == esperado:
-        print("  [OK  ] Salida correctamente ordenada")
-    else:
-        print(f"  [FALLO] Salida inesperada. Esperado: {esperado}")
+    # 9. leer salida ordenada
+    r = pedir(con, {"servicio": "gesfich", "operacion": "Leer", "id-fichero": id_salida})
+    salida = r.get("contenido", "").strip()
+    print(f"\n  Salida:   {salida!r}")
+    esperado = "arandano\nbanana\ncereza\nmanzana"
+    print("  [OK  ] Salida ordenada" if salida == esperado else f"  [FALLO] esperado {esperado!r}")
 
-    # 10. Terminar sistema
     print("\n  Terminando sistema...")
-    apagar(req, res, procs)
+    apagar(con, procs)
     print("\n=== Flujo Feliz: COMPLETADO ===")
 
 

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python --version)",
+      "PowerShell(py --version)",
+      "PowerShell(python -c \"import win32pipe; print\\('pywin32 OK'\\)\" 2>&1)"
+    ]
+  }
+}

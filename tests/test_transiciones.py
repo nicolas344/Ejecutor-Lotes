@@ -1,7 +1,7 @@
-import sys
 import os
+import sys
 sys.path.insert(0, os.path.dirname(__file__))
-from helper import arrancar_sistema, conectar_cliente, enviar, apagar
+from helper import arrancar_sistema, conectar_cliente, pedir, apagar
 
 PASS = 0
 FAIL = 0
@@ -17,59 +17,55 @@ def check(label, r, estado_esp, mensaje_esp=None):
         print(f"  [OK  ] {label}")
     else:
         FAIL += 1
-        print(f"  [FALLO] {label} → got: {r}")
+        print(f"  [FALLO] {label} -> {r}")
 
 
 def main():
-    print("=== Test: Transiciones Inválidas ===\n")
+    print("=== Test: Transiciones Invalidas ===\n")
     procs = arrancar_sistema()
-    req, res = conectar_cliente()
+    con = conectar_cliente()
 
     print("-- gesfich --")
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Reasumir"})
-    check("Reasumir sin estar suspendido", r, "error", "transicion invalida")
-
-    enviar(req, res, {"servicio": "gesfich", "operacion": "Suspender"})
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Suspender"})
-    check("Suspender dos veces", r, "error", "transicion invalida")
-
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Crear"})
-    check("Crear estando suspendido", r, "error", "transicion invalida")
-
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Reasumir"})
-    check("Reasumir correctamente", r, "ok")
-
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Crear"})
-    check("Crear tras reasumir", r, "ok")
+    check("Reasumir sin suspender", pedir(con, {"servicio": "gesfich", "operacion": "Reasumir"}),
+          "error", "transicion invalida")
+    pedir(con, {"servicio": "gesfich", "operacion": "Suspender"})
+    check("Suspender dos veces", pedir(con, {"servicio": "gesfich", "operacion": "Suspender"}),
+          "error", "transicion invalida")
+    check("Crear suspendido", pedir(con, {"servicio": "gesfich", "operacion": "Crear"}),
+          "error", "servicio suspendido")
+    check("Reasumir", pedir(con, {"servicio": "gesfich", "operacion": "Reasumir"}), "ok")
+    check("Crear tras reasumir", pedir(con, {"servicio": "gesfich", "operacion": "Crear"}), "ok")
 
     print("\n-- errores de recursos --")
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Leer", "id-fichero": "f-9999"})
-    check("Leer fichero inexistente", r, "error", "fichero no encontrado")
-
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Borrar", "id-fichero": "f-9999"})
-    check("Borrar fichero inexistente", r, "error", "fichero no encontrado")
-
-    r = enviar(req, res, {"servicio": "gesprog", "operacion": "Leer", "id-programa": "p-9999"})
-    check("Leer programa inexistente", r, "error", "programa no encontrado")
-
-    r = enviar(req, res, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": "e-9999"})
-    check("Estado de ejecucion inexistente", r, "error", "ejecucion no encontrada")
-
-    r = enviar(req, res, {"servicio": "ejecutor", "operacion": "Matar", "id-ejecucion": "e-9999"})
-    check("Matar ejecucion inexistente", r, "error", "ejecucion no encontrada")
+    check("Leer fichero inexistente",
+          pedir(con, {"servicio": "gesfich", "operacion": "Leer", "id-fichero": "f-9999"}),
+          "error", "fichero no encontrado")
+    check("Borrar fichero inexistente",
+          pedir(con, {"servicio": "gesfich", "operacion": "Borrar", "id-fichero": "f-9999"}),
+          "error", "fichero no encontrado")
+    check("Leer programa inexistente",
+          pedir(con, {"servicio": "gesprog", "operacion": "Leer", "id-programa": "p-9999"}),
+          "error", "programa no encontrado")
+    check("Estado ejecucion inexistente",
+          pedir(con, {"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": "e-9999"}),
+          "error", "proceso no encontrado")
+    check("Matar ejecucion inexistente",
+          pedir(con, {"servicio": "ejecutor", "operacion": "Matar", "id-ejecucion": "e-9999"}),
+          "error", "proceso no encontrado")
 
     print("\n-- errores de protocolo --")
-    r = enviar(req, res, {"servicio": "inventado", "operacion": "Crear"})
-    check("Servicio desconocido", r, "error", "servicio desconocido")
-
-    r = enviar(req, res, {"servicio": "gesfich", "operacion": "Inventar"})
-    check("Operacion desconocida en gesfich", r, "error", "operacion desconocida")
-
-    r = enviar(req, res, {"servicio": "ctrllt", "operacion": "Inventar"})
-    check("Operacion desconocida en ctrllt", r, "error", "operacion ctrllt desconocida")
+    check("Servicio desconocido",
+          pedir(con, {"servicio": "inventado", "operacion": "Crear"}),
+          "error", "servicio desconocido")
+    check("Operacion desconocida en gesfich",
+          pedir(con, {"servicio": "gesfich", "operacion": "Inventar"}),
+          "error", "operacion desconocida")
+    check("Operacion desconocida en ctrllt",
+          pedir(con, {"servicio": "ctrllt", "operacion": "Inventar"}),
+          "error", "operacion ctrllt desconocida")
 
     print(f"\n  Resultado: {PASS} OK, {FAIL} FALLO")
-    apagar(req, res, procs)
+    apagar(con, procs)
     print("=== Transiciones: COMPLETADO ===")
 
 

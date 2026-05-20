@@ -3,103 +3,84 @@ import os
 import sys
 import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from common.protocolo import leer_mensaje, escribir_mensaje
+from common import canal
 
-SERVICIOS_VALIDOS = {"gesfich", "gesprog", "ejecutor"}
+SERVICIOS = ("gesfich", "gesprog", "ejecutor")
 
 
-def enviar_a_servicio(req, res, lock, msg):
+def reenviar(con, lock, msg):
     with lock:
         try:
-            escribir_mensaje(req, msg)
-            return leer_mensaje(res)
+            con.enviar(msg)
+            return con.recibir()
         except Exception:
             return {"estado": "error", "mensaje": "error enviando solicitud al servicio"}
 
 
-def apagar_sistema(pipes, locks):
-    for nombre in ["gesfich", "gesprog"]:
-        req, res = pipes[nombre]
-        enviar_a_servicio(req, res, locks[nombre], {"servicio": nombre, "operacion": "Terminar"})
-
-    req, res = pipes["ejecutor"]
-    enviar_a_servicio(req, res, locks["ejecutor"], {"servicio": "ejecutor", "operacion": "Parar"})
+def apagar(servicios, locks):
+    for nombre in ("gesfich", "gesprog"):
+        reenviar(servicios[nombre], locks[nombre], {"servicio": nombre, "operacion": "Terminar"})
+    reenviar(servicios["ejecutor"], locks["ejecutor"], {"servicio": "ejecutor", "operacion": "Parar"})
 
 
-def manejar_cliente(cliente_req, cliente_res, pipes, locks):
+def atender(cli, servicios, locks):
     while True:
         try:
-            msg = leer_mensaje(cliente_req)
+            msg = cli.recibir()
         except (EOFError, ValueError):
-            break
+            return False
 
         servicio = msg.get("servicio", "")
         op = msg.get("operacion", "")
 
         if servicio == "ctrllt":
             if op == "Terminar":
-                apagar_sistema(pipes, locks)
-                escribir_mensaje(cliente_res, {"estado": "ok", "mensaje": "sistema terminando"})
-                return True  # señal de apagado
-            else:
-                escribir_mensaje(cliente_res, {"estado": "error", "mensaje": "operacion ctrllt desconocida"})
-                continue
-
-        if servicio not in SERVICIOS_VALIDOS:
-            escribir_mensaje(cliente_res, {"estado": "error", "mensaje": "servicio desconocido"})
+                apagar(servicios, locks)
+                cli.enviar({"estado": "ok"})
+                return True
+            cli.enviar({"estado": "error", "mensaje": "operacion ctrllt desconocida"})
             continue
 
-        req, res = pipes[servicio]
-        respuesta = enviar_a_servicio(req, res, locks[servicio], msg)
-        escribir_mensaje(cliente_res, respuesta)
+        if servicio not in servicios:
+            cli.enviar({"estado": "error", "mensaje": "servicio desconocido"})
+            continue
 
-    return False
+        cli.enviar(reenviar(servicios[servicio], locks[servicio], msg))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", required=True, help="Tuberia peticiones del cliente")
-    parser.add_argument("-a", required=True, help="Tuberia respuestas al cliente")
-    parser.add_argument("-f", required=True, help="Tuberia req a gesfich")
-    parser.add_argument("-b", required=True, help="Tuberia res de gesfich")
-    parser.add_argument("-p", required=True, help="Tuberia req a gesprog")
-    parser.add_argument("-q", required=True, help="Tuberia res de gesprog")
-    parser.add_argument("-e", required=True, help="Tuberia req a ejecutor")
-    parser.add_argument("-d", required=True, help="Tuberia res de ejecutor")
+    parser.add_argument("-c", required=True, help="peticiones del cliente")
+    parser.add_argument("-a", required=True, help="respuestas al cliente")
+    parser.add_argument("-f", required=True, help="req a gesfich")
+    parser.add_argument("-b", required=True, help="res de gesfich")
+    parser.add_argument("-p", required=True, help="req a gesprog")
+    parser.add_argument("-r", required=True, help="res de gesprog")
+    parser.add_argument("-e", required=True, help="req a ejecutor")
+    parser.add_argument("-d", required=True, help="res de ejecutor")
     args = parser.parse_args()
 
-    print("[ctrllt] Conectando a servicios...")
-    gesfich_req = open(args.f, "w")
-    gesfich_res = open(args.b, "r")
-    gesprog_req = open(args.p, "w")
-    gesprog_res = open(args.q, "r")
-    ejecutor_req = open(args.e, "w")
-    ejecutor_res = open(args.d, "r")
-
-    pipes = {
-        "gesfich": (gesfich_req, gesfich_res),
-        "gesprog": (gesprog_req, gesprog_res),
-        "ejecutor": (ejecutor_req, ejecutor_res),
+    print("[ctrllt] conectando a servicios...")
+    servicios = {
+        "gesfich": canal.cliente(args.f, args.b),
+        "gesprog": canal.cliente(args.p, args.r),
+        "ejecutor": canal.cliente(args.e, args.d),
     }
-    locks = {nombre: threading.Lock() for nombre in pipes}
+    locks = {nombre: threading.Lock() for nombre in servicios}
+    print("[ctrllt] listo")
 
-    for t in [args.c, args.a]:
-        if not os.path.exists(t):
-            os.mkfifo(t)
-
-    print(f"[ctrllt] Listo. Aceptando clientes en {args.c}...")
     while True:
-        with open(args.c, "r") as cliente_req, open(args.a, "w") as cliente_res:
-            print("[ctrllt] Cliente conectado.")
-            debe_terminar = manejar_cliente(cliente_req, cliente_res, pipes, locks)
-        print("[ctrllt] Cliente desconectado.")
-        if debe_terminar:
+        cli = canal.servidor(args.c, args.a)
+        print("[ctrllt] cliente conectado")
+        terminar = atender(cli, servicios, locks)
+        cli.cerrar()
+        print("[ctrllt] cliente desconectado")
+        if terminar:
             break
 
-    for f in [gesfich_req, gesfich_res, gesprog_req, gesprog_res, ejecutor_req, ejecutor_res]:
-        f.close()
-
-    print("[ctrllt] Terminado.")
+    for con in servicios.values():
+        con.cerrar()
+    print("[ctrllt] terminado")
 
 
 if __name__ == "__main__":
