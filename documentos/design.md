@@ -2,7 +2,7 @@
 
 **Curso:** Sistemas Operativos (ST0257)
 **Práctica:** Ejecutor de Lotes
-**Entrega:** Primera Entrega - Documentación de la API
+**Entrega:** Segunda Entrega - Implementación
 **Integrantes del grupo:** 
 - Nicolas Rico Montesino 
 - Santiago Alvarez Diaz
@@ -19,8 +19,7 @@
 7. [Formato de Mensajes (JSON)](#7-formato-de-mensajes-json)
 8. [API - Operaciones Detalladas](#8-api---operaciones-detalladas)
 9. [Máquinas de Estado](#9-máquinas-de-estado)
-10. [Códigos de Error](#10-códigos-de-error)
-
+10. [Mensajes de Error](#10-mensajes-de-error)
 
 ---
 
@@ -32,14 +31,22 @@
 |----------|---------|---------|
 | ID Fichero | `f-XXXX` | `f-0001` |
 | ID Programa | `p-XXXX` | `p-0001` |
-| ID Proceso | `proc-XXXX` | `proc-0001` |
-| Request ID | UUID v4 | `550e8400-e29b-41d4-a716-446655440000` |
+| ID Ejecución (proceso) | `e-XXXX` | `e-0001` |
+
+### 1.2 Constantes del protocolo
+
+| Constante | Valor | Descripción |
+|-----------|-------|-------------|
+| `MSG_MAX_LEN` | 4096 bytes | Tamaño máximo de un mensaje JSON |
+| Terminador | `\n` | Cada mensaje termina con un carácter newline |
+
+---
 
 ## 2. Introducción
 
-El presente documento describe el diseño del sistema **Ejecutor de Lotes**, una simulación de un sistema de ejecución similar al encontrado en sistemas operativos de mainframe. El sistema permite registrar imágenes de programas (ejecutables, argumentos, ambiente) y ficheros, para luego ejecutarlos como procesos de lotes que leen datos de una entrada estándar, los procesan y retornan el resultado por la salida estándar.
+El presente documento describe el diseño del sistema **Ejecutor de Lotes**, una simulación de un sistema de ejecución similar al encontrado en sistemas operativos de mainframe. El sistema permite registrar imágenes de programas (ejecutables, argumentos, ambiente) y ficheros, para luego ejecutarlos como procesos de lotes que redirigen su entrada/salida estándar a ficheros registrados en el almacenamiento.
 
-El sistema está diseñado siguiendo una **arquitectura de microservicios**, donde cada componente tiene una responsabilidad específica y se comunica con los demás a través de **tuberías nombradas (named pipes)** utilizando mensajes en formato **JSON**.
+El sistema está diseñado siguiendo una **arquitectura de microservicios**, donde cada componente tiene una responsabilidad específica y se comunica con los demás a través de **tuberías nombradas (named pipes)** utilizando mensajes en formato **JSON terminados en `\n`**.
 
 ---
 
@@ -48,13 +55,13 @@ El sistema está diseñado siguiendo una **arquitectura de microservicios**, don
 El sistema simula la ejecución de procesos por lotes en un mainframe. El flujo general es:
 
 1. Un **cliente** se conecta al controlador (`ctrllt`).
-2. El cliente registra **programas** (ejecutables) usando `gesprog`.
-3. El cliente registra **ficheros** (entrada/salida) usando `gesfich`.
-4. El cliente solicita la **ejecución** de procesos de lotes a través del `ejecutor`.
-5. El `ejecutor` toma los programas y ficheros del área de almacenamiento (`aralmac`) para crear los procesos.
+2. El cliente registra **ficheros** (entrada/salida) usando `gesfich`.
+3. El cliente registra **programas** (ejecutables) usando `gesprog`.
+4. El cliente solicita la **ejecución** de un proceso de lotes a través del `ejecutor`, indicando opcionalmente qué ficheros usar como stdin, stdout y stderr.
+5. El `ejecutor` lanza el programa del `aralmac` redirigiendo sus descriptores según lo indicado.
 6. El cliente puede consultar el estado o terminar los procesos en ejecución.
 
-El sistema opera con **un único cliente** conectado al servidor.
+El sistema soporta **múltiples clientes** conectados simultáneamente a `ctrllt`.
 
 ---
 
@@ -76,7 +83,7 @@ El sistema opera con **un único cliente** conectado al servidor.
                     │(Ficheros)│   │(Programas)│ │(Procesos)│
                     └──────┬──┘    └──────┬──┘  └────┬─────┘
                            │              │           │
-                           │   Tuberías Nombradas (JSON)
+                           │   Tuberías Nombradas (JSON + \n)
                            └──────────────┬───────────┘
                                           │
                                           ▼
@@ -86,22 +93,21 @@ El sistema opera con **un único cliente** conectado al servidor.
                                     │ Pasarela │
                                     └─────┬────┘
                                           │
-                                   Tubería Nombrada (JSON)
+                                   Tuberías Nombradas (JSON + \n)
                                           │
-                                          ▼
-                                    ┌──────────┐
-                                    │ cliente  │
-                                    └──────────┘
+                              ┌───────────┴───────────┐
+                              ▼                       ▼
+                        ┌──────────┐           ┌──────────┐
+                        │cliente 1 │           │cliente 2 │
+                        └──────────┘           └──────────┘
 ```
 
 ### 4.2 Patrón Arquitectónico
 
-El sistema sigue el patrón de **microservicios**, donde:
-
-- **`ctrllt`** actúa como **API Gateway / Pasarela**, recibiendo todas las peticiones del cliente y enrutándolas al servicio apropiado.
-- Cada servicio (**`gesfich`**, **`gesprog`**, **`ejecutor`**) es independiente, con su propia responsabilidad y máquina de estados.
-- Los servicios **`gesfich`**, **`gesprog`** y **`ejecutor`** acceden **directamente** a `aralmac` para leer y escribir datos. El `ejecutor` en particular no consulta a `gesfich` ni a `gesprog` a través de sus tuberías, sino que va directo al almacén.
+- **`ctrllt`** actúa como **pasarela**: recibe peticiones de los clientes y las dirige al servicio apropiado según el campo `servicio` del mensaje.
+- Cada servicio (**`gesfich`**, **`gesprog`**, **`ejecutor`**) es independiente y accede **directamente** a `aralmac`.
 - `ctrllt` **no accede** a `aralmac`.
+- `ctrllt` mantiene **un hilo por cliente** para soportar múltiples clientes simultáneos.
 
 ---
 
@@ -111,11 +117,6 @@ El sistema sigue el patrón de **microservicios**, donde:
 
 **Responsabilidad:** Interfaz de usuario que envía peticiones al sistema.
 
-**Operaciones que realiza:**
-- CRUD de programas (Crear, Leer, Actualizar, Borrar)
-- CRUD de ficheros (Crear, Leer, Actualizar, Borrar)
-- Lanzar, consultar y terminar procesos de lotes
-
 **Sinopsis:**
 ```
 cliente -c <tuberia-nombrada> [-a <tuberia-nombrada>]
@@ -124,35 +125,30 @@ cliente -c <tuberia-nombrada> [-a <tuberia-nombrada>]
 | Parámetro | Descripción | Obligatorio |
 |-----------|-------------|-------------|
 | `-c <tuberia-nombrada>` | Tubería para enviar peticiones a `ctrllt` | Sí |
-| `-a <tuberia-nombrada>` | Tubería para recibir respuestas (sólo en sistemas con tuberías half-duplex) | Opcional |
-
+| `-a <tuberia-nombrada>` | Tubería para recibir respuestas (solo en sistemas half-duplex) | Opcional |
 
 ---
 
 ### 5.2 ctrllt (Control de Lotes)
 
-**Responsabilidad:** Corazón del sistema. Funciona como pasarela que recibe peticiones de los clientes, las analiza y las dirige al servicio apropiado, esperando la respuesta y redirigiéndola al cliente.
-
-**Función principal:** Pasarela (Gateway).
+**Responsabilidad:** Pasarela que recibe peticiones de los clientes, las analiza según el campo `servicio` y las dirige al servicio apropiado, esperando la respuesta y redirigiéndola al cliente.
 
 **Sinopsis:**
 ```
-ctrllt -c <tuberia-nombrada> [-a <tuberia-nombrada>] \
-       -f <tuberia-nombrada> [-b <tuberia-nombrada>] \
-       -p <tuberia-nombrada> [-c <tuberia-nombrada>] \
+ctrllt -c <tuberia-nombrada> [-a <tuberia-nombrada>]
+       -f <tuberia-nombrada> [-b <tuberia-nombrada>]
+       -p <tuberia-nombrada> [-q <tuberia-nombrada>]
        -e <tuberia-nombrada> [-d <tuberia-nombrada>]
 ```
 
 | Parámetro | Descripción |
 |-----------|-------------|
-| `-c` | Tubería para recibir peticiones del cliente |
-| `-a` | Tubería para enviar respuestas al cliente (half-duplex) |
-| `-f` | Tubería para enviar peticiones a `gesfich` |
-| `-b` | Tubería para recibir respuestas de `gesfich` (half-duplex) |
-| `-p` | Tubería para enviar peticiones a `gesprog` |
-| `-c` | Tubería para recibir respuestas de `gesprog` (half-duplex) |
-| `-e` | Tubería para enviar peticiones a `ejecutor` |
-| `-d` | Tubería para recibir respuestas de `ejecutor` (half-duplex) |
+| `-c` / `-a` | Tubería cliente → ctrllt / ctrllt → cliente |
+| `-f` / `-b` | Tubería ctrllt → gesfich / gesfich → ctrllt |
+| `-p` / `-q` | Tubería ctrllt → gesprog / gesprog → ctrllt |
+| `-e` / `-d` | Tubería ctrllt → ejecutor / ejecutor → ctrllt |
+
+**Operación propia de ctrllt:** `Terminar`
 
 ---
 
@@ -162,16 +158,10 @@ ctrllt -c <tuberia-nombrada> [-a <tuberia-nombrada>] \
 
 **Sinopsis:**
 ```
-gesfich -f <tuberia-nombrada> [-b <tuberia-nombrada>] -x <info-aralmac>
+gesfich -f <tuberia-nombrada> [-b <tuberia-nombrada>] -x <ruta-aralmac>
 ```
 
-| Parámetro | Descripción |
-|-----------|-------------|
-| `-f <tuberia-nombrada>` | Tubería para recibir peticiones (o respuestas si es full-duplex) |
-| `-b <tuberia-nombrada>` | Tubería para enviar respuestas (half-duplex, opcional) |
-| `-x <info-aralmac>` | Configuración del almacenamiento (ruta, parámetros DB, etc.) |
-
-**Identificadores:** Los ficheros se identifican con el formato `f-XXXX` donde X es un dígito (ej: `f-0001`, `f-0002`).
+**Identificadores:** `f-XXXX` (ej: `f-0001`)
 
 ---
 
@@ -181,16 +171,10 @@ gesfich -f <tuberia-nombrada> [-b <tuberia-nombrada>] -x <info-aralmac>
 
 **Sinopsis:**
 ```
-gesprog -p <tuberia-nombrada> [-c <tuberia-nombrada>] -x <info-aralmac>
+gesprog -p <tuberia-nombrada> [-q <tuberia-nombrada>] -x <ruta-aralmac>
 ```
 
-| Parámetro | Descripción |
-|-----------|-------------|
-| `-p <tuberia-nombrada>` | Tubería para recibir peticiones (o respuestas si es full-duplex) |
-| `-c <tuberia-nombrada>` | Tubería para enviar respuestas (half-duplex, opcional) |
-| `-x <info-aralmac>` | Configuración del almacenamiento |
-
-**Identificadores:** Los programas se identifican con el formato `p-XXXX` (ej: `p-0001`, `p-0002`).
+**Identificadores:** `p-XXXX` (ej: `p-0001`)
 
 ---
 
@@ -200,16 +184,10 @@ gesprog -p <tuberia-nombrada> [-c <tuberia-nombrada>] -x <info-aralmac>
 
 **Sinopsis:**
 ```
-ejecutor -e <tuberia-nombrada> [-d <tuberia-nombrada>] -x <info-aralmac>
+ejecutor -e <tuberia-nombrada> [-d <tuberia-nombrada>] -x <ruta-aralmac>
 ```
 
-| Parámetro | Descripción |
-|-----------|-------------|
-| `-e <tuberia-nombrada>` | Tubería para recibir peticiones (o respuestas si es full-duplex) |
-| `-d <tuberia-nombrada>` | Tubería para enviar respuestas (half-duplex, opcional) |
-| `-x <info-aralmac>` | Configuración del almacenamiento |
-
-**Identificadores:** Los procesos en ejecución se identifican con el formato `proc-XXXX` (ej: `proc-0001`).
+**Identificadores de ejecución:** `e-XXXX` (ej: `e-0001`)
 
 ---
 
@@ -217,10 +195,10 @@ ejecutor -e <tuberia-nombrada> [-d <tuberia-nombrada>] -x <info-aralmac>
 
 **Responsabilidad:** Región de almacenamiento compartida donde se persisten programas y ficheros.
 
-**Tipos de almacenamiento posibles:**
-- Sistema de ficheros (directorio)
-- Base de datos relacional
-- Almacenamiento clave-valor
+Implementación: **directorio en el sistema de ficheros**.
+
+- Ficheros: `f-0001.dat`, `f-0002.dat`, ...
+- Programas: `p-0001.json`, `p-0002.json`, ... (metadatos: ejecutable, argumentos, ambiente)
 
 ---
 
@@ -230,102 +208,66 @@ ejecutor -e <tuberia-nombrada> [-d <tuberia-nombrada>] -x <info-aralmac>
 
 La comunicación entre componentes se realiza mediante **tuberías nombradas (named pipes)**:
 
-- **Sistemas con tuberías full-duplex:** Se requiere **una sola tubería** por conexión.
-- **Sistemas con tuberías half-duplex** (Linux, por ejemplo): Se requieren **dos tuberías nombradas** por conexión (una para envío, otra para recepción).
+- **Sistemas full-duplex (Windows):** Una sola tubería por conexión.
+- **Sistemas half-duplex (Linux):** Dos tuberías nombradas por conexión (una para envío, otra para recepción).
 
-> **Importante:** Cada tubería utilizada debe tener un **nombre único** dentro del sistema.
+> Cada tubería utilizada debe tener un **nombre único** dentro del sistema.
 
 ### 6.2 Flujo de Comunicación
 
 ```
-cliente  ─petición─►  ctrllt  ─petición─►  servicio (gesfich/gesprog/ejecutor)
-                                                            │
-cliente  ◄─respuesta─  ctrllt  ◄─respuesta─                 ┘
+cliente ──petición──► ctrllt ──petición──► servicio (gesfich/gesprog/ejecutor)
+                                                          │
+cliente ◄─respuesta── ctrllt ◄─respuesta──                ┘
 ```
 
-### 6.3 Concurrencia y Modelo de Cliente
+### 6.3 Concurrencia y Múltiples Clientes
 
-- El sistema opera con **un único cliente** conectado a `ctrllt`.
-- La concurrencia relevante ocurre dentro de **`ctrllt`**, que debe manejar mensajes entrantes del cliente y respuestas de múltiples servicios usando **hilos (threads)**.
-- Las escrituras en las tuberías son **atómicas** a nivel del sistema operativo, por lo que los mensajes no se mezclan entre sí.
-- El `request_id` de cada mensaje permite correlacionar peticiones con sus respuestas en todo momento.
+- `ctrllt` mantiene **un hilo por cliente conectado**.
+- Cada hilo lee peticiones del cliente y reenvía al servicio correspondiente de forma sincrónica (espera la respuesta antes de leer la siguiente petición).
+- Las escrituras en tuberías son atómicas a nivel del SO para mensajes ≤ `PIPE_BUF`, por lo que los mensajes no se mezclan.
 
 ---
 
 ## 7. Formato de Mensajes (JSON)
 
-Todos los mensajes intercambiados entre componentes utilizan el formato **JSON**.
+Todos los mensajes usan **JSON terminado en `\n`** con un tamaño máximo de **4096 bytes** (`MSG_MAX_LEN`).
 
-### 7.1 Estructura de Petición (Request)
+### 7.1 Estructura de Petición
 
-```json
-{
-  "request_id": "uuid-v4",
-  "operation": "<nombre_operacion>",
-  "service": "<gesfich|gesprog|ejecutor>",
-  "params": {
-    ...
-  },
-  "timestamp": "2026-05-05T10:30:00Z"
-}
-```
-
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `request_id` | string (UUID) | Identificador único de la petición |
-| `operation` | string | Nombre de la operación a ejecutar |
-| `service` | string | Servicio destino (`gesfich`, `gesprog`, `ejecutor`) |
-| `params` | object | Parámetros de la operación |
-| `timestamp` | string (ISO 8601) | Marca de tiempo de la petición |
-
-### 7.2 Estructura de Respuesta (Response)
+Los campos son **planos** (no hay objeto `params` anidado). El campo `servicio` indica el destino; `operacion` indica la acción.
 
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    ...
-  },
-  "error": null,
-  "timestamp": "2026-05-05T10:30:01Z"
-}
+{"servicio": "gesfich", "operacion": "Crear"}
 ```
+
+```json
+{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
+```
+
+```json
+{"servicio": "ejecutor", "operacion": "Ejecutar", "id-programa": "p-0001", "stdin": "f-0001", "stdout": "f-0002"}
+```
+
+### 7.2 Estructura de Respuesta
+
+Solo dos campos obligatorios: `estado` y `mensaje`. El resto de campos son planos y opcionales según la operación.
 
 **Respuesta exitosa:**
 ```json
-{
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "success",
-  "data": {
-    "id": "p-0001"
-  },
-  "error": null,
-  "timestamp": "2026-05-05T10:30:01Z"
-}
+{"estado": "ok", "mensaje": "fichero creado", "id-fichero": "f-0001"}
 ```
 
 **Respuesta de error:**
 ```json
-{
-  "request_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "error",
-  "data": null,
-  "error": {
-    "code": "FILE_NOT_FOUND",
-    "message": "El fichero con id f-9999 no existe en aralmac"
-  },
-  "timestamp": "2026-05-05T10:30:01Z"
-}
+{"estado": "error", "mensaje": "fichero no encontrado"}
 ```
 
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `request_id` | string | Mismo ID que la petición |
-| `status` | string | `success` o `error` |
-| `data` | object/null | Datos de respuesta (null si hay error) |
-| `error` | object/null | Detalle del error (null si fue exitoso) |
-| `timestamp` | string (ISO 8601) | Marca de tiempo de la respuesta |
+| Campo | Tipo | Valores | Descripción |
+|-------|------|---------|-------------|
+| `estado` | string | `"ok"` / `"error"` | Resultado de la operación |
+| `mensaje` | string | — | Descripción del resultado o del error |
+| (otros) | — | — | Campos adicionales planos según la operación |
 
 ---
 
@@ -333,536 +275,304 @@ Todos los mensajes intercambiados entre componentes utilizan el formato **JSON**
 
 ### 8.1 Operaciones de gesfich
 
-#### 8.1.1 Crear Fichero
+#### 8.1.1 Crear
 
-Crea un fichero vacío en `aralmac`.
+Crea un fichero vacío en `aralmac` y retorna su identificador.
 
-**Operación:** `crear_fichero`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "crear_fichero",
-  "service": "gesfich",
-  "params": {}
-}
+{"servicio": "gesfich", "operacion": "Crear"}
 ```
-
-**Respuesta exitosa:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_fichero": "f-0001"
-  }
-}
+{"estado": "ok", "mensaje": "fichero creado", "id-fichero": "f-0001"}
 ```
 
 ---
 
-#### 8.1.2 Leer Fichero (uno específico)
+#### 8.1.2 Leer
 
 Retorna el contenido de un fichero existente.
 
-**Operación:** `leer_fichero`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "leer_fichero",
-  "service": "gesfich",
-  "params": {
-    "id_fichero": "f-0001"
-  }
-}
+{"servicio": "gesfich", "operacion": "Leer", "id-fichero": "f-0001"}
+```
+```json
+{"estado": "ok", "mensaje": "ok", "id-fichero": "f-0001", "contenido": "datos del fichero"}
 ```
 
-**Respuesta exitosa:**
+Error:
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_fichero": "f-0001",
-    "contenido": "...",
-    "tamaño_bytes": 1024
-  }
-}
+{"estado": "error", "mensaje": "fichero no encontrado"}
 ```
 
 ---
 
-#### 8.1.3 Listar Ficheros
+#### 8.1.3 Actualizar
 
-Retorna la información de todos los ficheros registrados.
+Reemplaza el contenido de un fichero con datos provistos por el cliente.
 
-**Operación:** `listar_ficheros`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "listar_ficheros",
-  "service": "gesfich",
-  "params": {}
-}
+{"servicio": "gesfich", "operacion": "Actualizar", "id-fichero": "f-0001", "contenido": "nuevo contenido"}
 ```
-
-**Respuesta exitosa:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "ficheros": [
-      {"id_fichero": "f-0001", "tamaño_bytes": 1024},
-      {"id_fichero": "f-0002", "tamaño_bytes": 2048}
-    ]
-  }
-}
+{"estado": "ok", "mensaje": "fichero actualizado", "id-fichero": "f-0001"}
 ```
 
 ---
 
-#### 8.1.4 Actualizar Fichero
+#### 8.1.4 Borrar
 
-Copia el contenido de un fichero del sistema dentro de `aralmac`.
+Elimina un fichero de `aralmac`. Falla si el fichero está en uso por un proceso activo.
 
-**Operación:** `actualizar_fichero`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "actualizar_fichero",
-  "service": "gesfich",
-  "params": {
-    "id_fichero": "f-0001",
-    "ruta_origen": "/home/usuario/datos.txt"
-  }
-}
+{"servicio": "gesfich", "operacion": "Borrar", "id-fichero": "f-0001"}
+```
+```json
+{"estado": "ok", "mensaje": "fichero borrado", "id-fichero": "f-0001"}
 ```
 
-**Respuesta exitosa:**
+Error (en uso):
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_fichero": "f-0001",
-    "actualizado": true
-  }
-}
+{"estado": "error", "mensaje": "fichero en uso"}
 ```
 
 ---
 
-#### 8.1.5 Borrar Fichero
+#### 8.1.5 Listar
 
-Elimina un fichero de `aralmac`.
+Retorna la lista de todos los ficheros registrados.
 
-> **Importante:** Si el fichero está siendo utilizado por un proceso de lotes activo, la operación retorna el error `FILE_IN_USE` y el fichero **no se borra**. Se asume que el cliente es responsable de no intentar borrar ficheros que estén en uso.
-
-**Operación:** `borrar_fichero`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "borrar_fichero",
-  "service": "gesfich",
-  "params": {
-    "id_fichero": "f-0001"
-  }
-}
+{"servicio": "gesfich", "operacion": "Listar"}
 ```
-
-**Respuesta exitosa:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_fichero": "f-0001",
-    "borrado": true
-  }
-}
-```
-
-**Respuesta de error (fichero en uso):**
-```json
-{
-  "request_id": "uuid-v4",
-  "status": "error",
-  "data": null,
-  "error": {
-    "code": "FILE_IN_USE",
-    "message": "El fichero 'f-0001' está siendo utilizado por el proceso proc-0001"
-  }
-}
+{"estado": "ok", "mensaje": "ok", "ficheros": ["f-0001", "f-0002"]}
 ```
 
 ---
 
-#### 8.1.6 Operaciones de Control de gesfich
+#### 8.1.6 Control de gesfich
 
-| Operación | Descripción |
-|-----------|-------------|
-| `suspender` | Suspende el servicio (estado: Suspendido) |
-| `reasumir` | Reanuda el servicio (estado: Corriendo) |
-| `terminar` | Termina la ejecución del servicio (estado: Terminado) |
+| Operación | Petición | Efecto |
+|-----------|----------|--------|
+| `Suspender` | `{"servicio":"gesfich","operacion":"Suspender"}` | Pausa el servicio |
+| `Reasumir` | `{"servicio":"gesfich","operacion":"Reasumir"}` | Reanuda el servicio |
+| `Terminar` | `{"servicio":"gesfich","operacion":"Terminar"}` | Termina el servicio |
+
+Error en transición inválida:
+```json
+{"estado": "error", "mensaje": "transicion invalida"}
+```
 
 ---
 
 ### 8.2 Operaciones de gesprog
 
-#### 8.2.1 Guardar Programa
+#### 8.2.1 Guardar
 
 Registra un nuevo programa en `aralmac`.
 
-**Operación:** `guardar_programa`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "guardar_programa",
-  "service": "gesprog",
-  "params": {
-    "ejecutable": "/ruta/al/binario_o_script",
-    "argumentos": ["arg1", "arg2", "--opcion"],
-    "ambiente": {
-      "PATH": "/usr/bin:/bin",
-      "LANG": "es_ES.UTF-8"
-    }
-  }
-}
+{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
 ```
-
-**Respuesta exitosa:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_programa": "p-0001"
-  }
-}
+{"estado": "ok", "mensaje": "programa guardado", "id-programa": "p-0001"}
 ```
 
 ---
 
-#### 8.2.2 Leer Programa
+#### 8.2.2 Leer
 
-Retorna la información de un programa existente.
+Retorna los metadatos de un programa.
 
-**Operación:** `leer_programa`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "leer_programa",
-  "service": "gesprog",
-  "params": {
-    "id_programa": "p-0001"
-  }
-}
+{"servicio": "gesprog", "operacion": "Leer", "id-programa": "p-0001"}
+```
+```json
+{"estado": "ok", "mensaje": "ok", "id-programa": "p-0001", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
 ```
 
-**Respuesta exitosa:**
+Error:
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_programa": "p-0001",
-    "ejecutable": "/ruta/al/binario",
-    "argumentos": ["arg1", "arg2"],
-    "ambiente": {"PATH": "/usr/bin"}
-  }
-}
+{"estado": "error", "mensaje": "programa no encontrado"}
 ```
 
 ---
 
-#### 8.2.3 Listar Programas
+#### 8.2.3 Actualizar
 
-Retorna la lista de todos los programas registrados.
+Actualiza los metadatos de un programa existente.
 
-**Operación:** `listar_programas`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "listar_programas",
-  "service": "gesprog",
-  "params": {}
-}
+{"servicio": "gesprog", "operacion": "Actualizar", "id-programa": "p-0001", "ejecutable": "/usr/bin/sort", "argumentos": [], "ambiente": {}}
 ```
-
-**Respuesta exitosa:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "programas": [
-      {"id_programa": "p-0001", "ejecutable": "/bin/echo"},
-      {"id_programa": "p-0002", "ejecutable": "/usr/bin/python3"}
-    ]
-  }
-}
+{"estado": "ok", "mensaje": "programa actualizado", "id-programa": "p-0001"}
 ```
 
 ---
 
-#### 8.2.4 Actualizar Programa
-
-Actualiza la información de un programa registrado.
-
-**Operación:** `actualizar_programa`
-
-**Petición:**
-```json
-{
-  "request_id": "uuid-v4",
-  "operation": "actualizar_programa",
-  "service": "gesprog",
-  "params": {
-    "id_programa": "p-0001",
-    "ejecutable": "/nueva/ruta/al/binario",
-    "argumentos": ["nuevo_arg"],
-    "ambiente": {"PATH": "/usr/local/bin"}
-  }
-}
-```
-
-**Respuesta exitosa:**
-```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_programa": "p-0001",
-    "actualizado": true
-  }
-}
-```
-
----
-
-#### 8.2.5 Borrar Programa
+#### 8.2.4 Borrar
 
 Elimina un programa de `aralmac`.
 
-**Operación:** `borrar_programa`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "borrar_programa",
-  "service": "gesprog",
-  "params": {
-    "id_programa": "p-0001"
-  }
-}
+{"servicio": "gesprog", "operacion": "Borrar", "id-programa": "p-0001"}
+```
+```json
+{"estado": "ok", "mensaje": "programa borrado", "id-programa": "p-0001"}
 ```
 
-**Respuesta exitosa:**
+Error:
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_programa": "p-0001",
-    "borrado": true
-  }
-}
+{"estado": "error", "mensaje": "programa no encontrado"}
 ```
 
 ---
 
-#### 8.2.6 Operaciones de Control de gesprog
+#### 8.2.5 Listar
 
-| Operación | Descripción |
-|-----------|-------------|
-| `suspender` | Suspende el servicio |
-| `reasumir` | Reanuda el servicio |
-| `terminar` | Termina el servicio |
+Retorna la lista de todos los programas registrados.
+
+```json
+{"servicio": "gesprog", "operacion": "Listar"}
+```
+```json
+{"estado": "ok", "mensaje": "ok", "programas": ["p-0001", "p-0002"]}
+```
+
+---
+
+#### 8.2.6 Control de gesprog
+
+| Operación | Efecto |
+|-----------|--------|
+| `Suspender` | Pausa el servicio |
+| `Reasumir` | Reanuda el servicio |
+| `Terminar` | Termina el servicio |
 
 ---
 
 ### 8.3 Operaciones de ejecutor
 
-#### 8.3.1 Ejecutar Proceso de Lotes
+#### 8.3.1 Ejecutar
 
-Ejecuta un proceso de lotes siguiendo el formato de cadena:
+Lanza un proceso de lotes a partir de un programa registrado. Los campos `stdin`, `stdout` y `stderr` son opcionales: si se omiten, el proceso hereda los descriptores del servicio `ejecutor`.
 
-**`fichero_entrada → programa_1 → programa_2 → ... → fichero_salida`**
+La operación es **no bloqueante**: el ejecutor valida, lanza el proceso, y responde de inmediato con el `id-ejecucion`.
 
-El fichero de entrada y el fichero de salida son **obligatorios**. La lista de programas define la cadena de procesos que se ejecutarán secuencialmente, donde la salida de uno es la entrada del siguiente.
-
-La operación es **no bloqueante**: el ejecutor valida la petición, crea el proceso de lotes, y devuelve inmediatamente el identificador. Internamente lanza un hilo que espera a que el lote termine, momento en el que envía una notificación al cliente.
-
-**Operación:** `ejecutar_proceso`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "ejecutar_proceso",
-  "service": "ejecutor",
-  "params": {
-    "id_fichero_entrada": "f-0001",
-    "programas": ["p-0001", "p-0002"],
-    "id_fichero_salida": "f-0002"
-  }
-}
+{"servicio": "ejecutor", "operacion": "Ejecutar", "id-programa": "p-0001", "stdin": "f-0001", "stdout": "f-0002", "stderr": "f-0003"}
 ```
 
-**Respuesta inmediata** (al recibir la petición válida):
+Respuesta inmediata:
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_proceso": "proc-0001",
-    "estado": "ejecutando"
-  }
-}
+{"estado": "ok", "mensaje": "proceso lanzado", "id-ejecucion": "e-0001"}
 ```
 
-**Notificación de fin** (enviada cuando el lote termina):
+Error (programa no existe):
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_proceso": "proc-0001",
-    "estado": "terminado",
-    "razon_fin": "completado"
-  }
-}
+{"estado": "error", "mensaje": "programa no encontrado"}
 ```
 
-> **Nota:** Si la petición es inválida (algún ID no existe), el ejecutor responde con error inmediatamente y no crea el proceso.
-
----
-
-#### 8.3.2 Estado de un Proceso
-
-Consulta el estado actual de un proceso específico.
-
-**Operación:** `estado_proceso`
-
-**Petición:**
+Error (fichero no existe):
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "estado_proceso",
-  "service": "ejecutor",
-  "params": {
-    "id_proceso": "proc-0001"
-  }
-}
-```
-
-**Respuesta exitosa:**
-```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_proceso": "proc-0001",
-    "estado": "ejecutando",
-    "id_programa": "p-0001",
-    "tiempo_inicio": "2026-05-05T10:30:00Z"
-  }
-}
-```
-
-**Estados posibles:** `ejecutando`, `terminado`, `cancelado`, `error`.
-
----
-
-#### 8.3.3 Listar Procesos
-
-Retorna el estado de todos los procesos de lotes.
-
-**Operación:** `listar_procesos`
-
-**Petición:**
-```json
-{
-  "request_id": "uuid-v4",
-  "operation": "listar_procesos",
-  "service": "ejecutor",
-  "params": {}
-}
-```
-
-**Respuesta exitosa:**
-```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "procesos": [
-      {"id_proceso": "proc-0001", "estado": "ejecutando"},
-      {"id_proceso": "proc-0002", "estado": "terminado"}
-    ]
-  }
-}
+{"estado": "error", "mensaje": "fichero no encontrado"}
 ```
 
 ---
 
-#### 8.3.4 Matar Proceso
+#### 8.3.2 Estado
 
-Termina forzadamente un proceso de lotes en ejecución. El proceso queda marcado como **cancelado por agente externo**.
+Consulta el estado actual de un proceso.
 
-**Operación:** `matar_proceso`
-
-**Petición:**
 ```json
-{
-  "request_id": "uuid-v4",
-  "operation": "matar_proceso",
-  "service": "ejecutor",
-  "params": {
-    "id_proceso": "proc-0001"
-  }
-}
+{"servicio": "ejecutor", "operacion": "Estado", "id-ejecucion": "e-0001"}
 ```
 
-**Respuesta exitosa:**
+Proceso en ejecución:
 ```json
-{
-  "request_id": "uuid-v4",
-  "status": "success",
-  "data": {
-    "id_proceso": "proc-0001",
-    "estado": "cancelado",
-    "razon_fin": "agente_externo"
-  }
-}
+{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Ejecutando"}
+```
+
+Proceso terminado:
+```json
+{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Terminado", "codigo-salida": 0}
+```
+
+Proceso suspendido:
+```json
+{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Suspendido"}
+```
+
+**Estados posibles de un proceso:** `"Ejecutando"`, `"Suspendido"`, `"Terminado"`.
+
+El campo `codigo-salida` solo aparece cuando el estado es `"Terminado"`.
+
+---
+
+#### 8.3.3 Listar
+
+Retorna todos los procesos conocidos por el ejecutor.
+
+```json
+{"servicio": "ejecutor", "operacion": "Listar"}
+```
+```json
+{"estado": "ok", "mensaje": "ok", "ejecuciones": ["e-0001", "e-0002"]}
 ```
 
 ---
 
-#### 8.3.5 Operaciones de Control de ejecutor
+#### 8.3.4 Matar
 
-| Operación | Descripción |
-|-----------|-------------|
-| `suspender` | Suspende el servicio |
-| `reasumir` | Reanuda el servicio |
-| `parar` | Detiene la aceptación de nuevos procesos |
+Termina forzadamente un proceso en ejecución.
+
+```json
+{"servicio": "ejecutor", "operacion": "Matar", "id-ejecucion": "e-0001"}
+```
+```json
+{"estado": "ok", "mensaje": "proceso terminado", "id-ejecucion": "e-0001"}
+```
+
+Error:
+```json
+{"estado": "error", "mensaje": "ejecucion no encontrada"}
+```
+
+---
+
+#### 8.3.5 Control de ejecutor
+
+| Operación | Efecto |
+|-----------|--------|
+| `Suspender` | Pausa el servicio (no acepta nuevas peticiones; los procesos activos continúan) |
+| `Reasumir` | Reanuda el servicio |
+| `Parar` | Cierre ordenado: no acepta nuevos lotes, espera a que los activos terminen |
+
+> **Nota:** `ctrllt` envía `Parar` al ejecutor (no `Terminar`) cuando recibe la operación `Terminar` propia.
+
+---
+
+### 8.4 Operación propia de ctrllt
+
+#### 8.4.1 Terminar
+
+Propagación ordenada de apagado del sistema.
+
+```json
+{"servicio": "ctrllt", "operacion": "Terminar"}
+```
+
+`ctrllt` ejecuta en orden:
+1. Envía `Terminar` a `gesfich` y `gesprog`
+2. Envía `Parar` a `ejecutor`
+3. Espera confirmación de cada uno
+4. Se apaga
+
+Respuesta al cliente:
+```json
+{"estado": "ok", "mensaje": "sistema terminando"}
+```
 
 ---
 
@@ -871,105 +581,118 @@ Termina forzadamente un proceso de lotes en ejecución. El proceso queda marcado
 ### 9.1 ctrllt
 
 ```
-   ┌────────┐    iniciar    ┌──────────┐    terminar    ┌────────────┐
-   │ inicio │ ─────────────►│ Corriendo│ ──────────────►│ Terminando │──► Terminado
-   └────────┘               └──────────┘                └────────────┘
+┌────────┐  iniciar  ┌──────────┐  Terminar  ┌────────────┐  todos OK  ┌───────────┐
+│ Inicio │ ─────────►│ Corriendo│ ──────────►│ Terminando │ ──────────►│ Terminado │
+└────────┘           └──────────┘            └────────────┘            └───────────┘
 ```
 
 | Estado | Descripción |
 |--------|-------------|
-| `inicio` | Estado inicial antes de aceptar peticiones |
-| `Corriendo` | Aceptando y procesando peticiones |
-| `Terminando` | Enviando señal de `terminar` a gesfich, gesprog y ejecutor, esperando que finalicen |
-| `Terminado` | Todos los servicios dependientes han terminado. ctrllt se apaga |
-
-**Comportamiento al terminar:**
-Al recibir la operación `terminar`, `ctrllt` sigue este orden antes de apagarse:
-1. Envía `terminar` a `gesfich`, `gesprog` y `ejecutor`
-2. Espera a que cada uno confirme que terminó
-3. Una vez que todos han finalizado, `ctrllt` termina su propia ejecución
+| `Inicio` | Estado inicial |
+| `Corriendo` | Aceptando y enrutando peticiones de clientes |
+| `Terminando` | Esperando confirmación de gesfich, gesprog y ejecutor |
+| `Terminado` | Todos los servicios finalizaron; ctrllt se apaga |
 
 ---
 
 ### 9.2 gesfich y gesprog
 
 ```
-                       Crear/Leer/
-                       Actualizar/Borrar
-                            │
-                            ▼
-   ┌────────┐  iniciar  ┌──────────┐  suspender   ┌─────────────┐
-   │ inicio │ ────────► │ Corriendo│ ───────────► │ Suspendido  │
-   └────────┘           └─────┬────┘  ◄────────── └──────┬──────┘
-                              │      reasumir            │
-                              │                          │
-                              │ terminar       terminar  │
-                              ▼                          ▼
-                        ┌────────────┐
-                        │ Terminado  │
-                        └────────────┘
+┌────────┐  iniciar  ┌──────────┐  Suspender  ┌────────────┐
+│ Inicio │ ─────────►│ Corriendo│ ───────────►│ Suspendido │
+└────────┘           └────┬─────┘ ◄─────────── └─────┬──────┘
+                          │        Reasumir           │
+                          │ Terminar         Terminar │
+                          ▼                           ▼
+                     ┌───────────┐
+                     │ Terminado │
+                     └───────────┘
 ```
 
 | Estado | Descripción |
 |--------|-------------|
-| `inicio` | Estado inicial |
-| `Corriendo` | Procesando peticiones (CRUD) |
-| `Suspendido` | Servicio pausado, no procesa peticiones |
+| `Inicio` | Estado inicial |
+| `Corriendo` | Procesando operaciones CRUD |
+| `Suspendido` | Pausado; rechaza peticiones con `"transicion invalida"` |
 | `Terminado` | Servicio finalizado |
-
-**Transiciones:**
-- `Corriendo → Suspendido`: con operación `suspender`
-- `Suspendido → Corriendo`: con operación `reasumir`
-- `Corriendo/Suspendido → Terminado`: con operación `terminar`
 
 ---
 
-### 9.3 ejecutor
+### 9.3 ejecutor (servicio)
 
 ```
-                  Ejecutar/Estado/Matar
-                          │
+┌────────┐  iniciar  ┌──────────┐  Suspender  ┌────────────┐
+│ Inicio │ ─────────►│ Corriendo│ ───────────►│ Suspendido │
+└────────┘           └────┬─────┘ ◄─────────── └────────────┘
+                          │        Reasumir
+                          │ Parar
                           ▼
-   ┌────────┐  ┌────────────────┐  suspender   ┌──────────────┐
-   │ inicio │─►│   Ejecutar     │ ───────────► │ Suspendidos  │
-   └────────┘  └────┬───────────┘  ◄────────── └──────────────┘
-                    │     reasumir
-                    │ parar
-                    ▼   /Procesos = 0
-              ┌─────────┐  terminar  ┌────────────┐
-              │  Parar  │ ─────────► │ Terminado  │
-              └─────────┘            └────────────┘
+                     ┌──────────┐  /procesos=0  ┌───────────┐
+                     │  Parando │ ─────────────►│ Terminado │
+                     └──────────┘               └───────────┘
 ```
 
 | Estado | Descripción |
 |--------|-------------|
-| `inicio` | Estado inicial |
-| `Ejecutar` | Aceptando y ejecutando procesos de lotes |
-| `Suspendido` | No acepta nuevas peticiones. Los procesos de lotes **ya en ejecución continúan hasta terminar**. Las peticiones nuevas se rechazan con `SERVICE_UNAVAILABLE` |
-| `Parar` | No acepta nuevos procesos. Espera a que todos los procesos activos terminen (graceful shutdown) |
-| `Terminado` | Servicio finalizado |
+| `Corriendo` | Acepta `Ejecutar`, `Estado`, `Listar`, `Matar` |
+| `Suspendido` | No acepta nuevas peticiones; los procesos activos continúan |
+| `Parando` | No acepta nuevos lotes; espera a que los activos terminen |
+| `Terminado` | Todos los procesos terminaron; servicio finalizado |
 
-**Diferencia entre Parar y Terminar:**
-- **Parar:** Cierre ordenado. El ejecutor deja de aceptar nuevos lotes y espera a que los activos terminen naturalmente antes de apagarse.
-- **Terminar:** Apagado inmediato del servicio una vez que el estado `Parar` completó su ciclo (`/Procesos = 0`).
+### 9.4 Proceso individual (dentro del ejecutor)
+
+```
+┌──────────┐  lanzar  ┌────────────┐  termina/Matar  ┌───────────┐
+│  (nuevo) │ ────────►│ Ejecutando │ ───────────────►│ Terminado │
+└──────────┘          └─────┬──────┘                 └───────────┘
+                            │ Suspender
+                            ▼
+                      ┌────────────┐
+                      │ Suspendido │
+                      └─────┬──────┘
+                            │ Reasumir
+                            └──────────► Ejecutando
+```
 
 ---
 
-## 10. Códigos de Error
+## 10. Mensajes de Error
 
-| Código | Descripción |
-|--------|-------------|
-| `INVALID_REQUEST` | Estructura de petición inválida |
-| `INVALID_PARAMS` | Parámetros inválidos o faltantes |
-| `FILE_NOT_FOUND` | Fichero no encontrado en aralmac |
-| `FILE_IN_USE` | Fichero en uso por un proceso activo, no puede ser borrado |
-| `PROGRAM_NOT_FOUND` | Programa no encontrado en aralmac |
-| `PROCESS_NOT_FOUND` | Proceso no encontrado |
-| `PROCESS_CANCELLED` | Proceso terminado por agente externo (matar) |
-| `INVALID_STATE` | Operación no válida en el estado actual |
-| `EXECUTABLE_INVALID` | El ejecutable no es válido o no existe |
-| `STORAGE_ERROR` | Error en el área de almacenamiento |
-| `PIPE_ERROR` | Error de comunicación en la tubería |
-| `INTERNAL_ERROR` | Error interno del servicio |
-| `SERVICE_UNAVAILABLE` | Servicio suspendido o terminado, no acepta peticiones |
+Los errores se devuelven siempre con `"estado": "error"` y un `"mensaje"` en español.
 
+### Errores de gesfich
+
+| Situación | `mensaje` |
+|-----------|-----------|
+| Fichero no existe | `"fichero no encontrado"` |
+| Fichero en uso por proceso activo | `"fichero en uso"` |
+| Servicio suspendido o terminado | `"transicion invalida"` |
+| Operación desconocida | `"operacion desconocida"` |
+
+### Errores de gesprog
+
+| Situación | `mensaje` |
+|-----------|-----------|
+| Programa no existe | `"programa no encontrado"` |
+| Servicio suspendido o terminado | `"transicion invalida"` |
+| Operación desconocida | `"operacion desconocida"` |
+
+### Errores de ejecutor
+
+| Situación | `mensaje` |
+|-----------|-----------|
+| Programa no existe | `"programa no encontrado"` |
+| Fichero referenciado no existe | `"fichero no encontrado"` |
+| Ejecución no existe | `"ejecucion no encontrada"` |
+| Servicio suspendido/parando | `"transicion invalida"` |
+| Operación desconocida | `"operacion desconocida"` |
+
+### Errores de ctrllt
+
+| Situación | `mensaje` |
+|-----------|-----------|
+| Campo `servicio` desconocido | `"servicio desconocido"` |
+| Operación propia desconocida | `"operacion ctrllt desconocida"` |
+| Servicio destino no conectado | `"servicio no conectado"` |
+| Error al enviar al servicio | `"error enviando solicitud al servicio"` |
+| Error al leer respuesta del servicio | `"error leyendo respuesta del servicio"` |
