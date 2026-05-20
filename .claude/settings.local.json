@@ -3,7 +3,8 @@
     "allow": [
       "PowerShell(python --version)",
       "PowerShell(py --version)",
-      "PowerShell(python -c \"import win32pipe; print\\('pywin32 OK'\\)\" 2>&1)"
+      "PowerShell(python -c \"import win32pipe; print\\('pywin32 OK'\\)\" 2>&1)",
+      "PowerShell($p = wsl wslpath \"C:\\\\Users\\\\user\\\\Downloads\\\\Ejecutor-Lotes\"; Write-Host \"ruta WSL: $p\"; wsl bash -c \"cd '$p' && python3 tests/flujo_feliz.py 2>&1 | grep -E 'OK|FALLO|==='\")"
     ]
   }
 }

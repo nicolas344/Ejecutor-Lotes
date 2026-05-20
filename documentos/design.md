@@ -48,6 +48,8 @@ El presente documento describe el diseño del sistema **Ejecutor de Lotes**, una
 
 El sistema está diseñado siguiendo una **arquitectura de microservicios**, donde cada componente tiene una responsabilidad específica y se comunica con los demás a través de **tuberías nombradas (named pipes)** utilizando mensajes en formato **JSON terminados en `\n`**.
 
+La implementación corre en **Linux y Windows 11**. La capa de transporte (`src/common/canal.py`) abstrae la tubería: en Linux usa FIFOs half-duplex (dos tuberías por conexión) y en Windows usa named pipes full-duplex (una sola tubería). El resto del código es idéntico en ambos sistemas.
+
 ---
 
 ## 3. Descripción General del Sistema
@@ -137,7 +139,7 @@ cliente -c <tuberia-nombrada> [-a <tuberia-nombrada>]
 ```
 ctrllt -c <tuberia-nombrada> [-a <tuberia-nombrada>]
        -f <tuberia-nombrada> [-b <tuberia-nombrada>]
-       -p <tuberia-nombrada> [-q <tuberia-nombrada>]
+       -p <tuberia-nombrada> [-r <tuberia-nombrada>]
        -e <tuberia-nombrada> [-d <tuberia-nombrada>]
 ```
 
@@ -145,8 +147,10 @@ ctrllt -c <tuberia-nombrada> [-a <tuberia-nombrada>]
 |-----------|-------------|
 | `-c` / `-a` | Tubería cliente → ctrllt / ctrllt → cliente |
 | `-f` / `-b` | Tubería ctrllt → gesfich / gesfich → ctrllt |
-| `-p` / `-q` | Tubería ctrllt → gesprog / gesprog → ctrllt |
+| `-p` / `-r` | Tubería ctrllt → gesprog / gesprog → ctrllt |
 | `-e` / `-d` | Tubería ctrllt → ejecutor / ejecutor → ctrllt |
+
+> En Windows solo se usa la primera tubería de cada par (full-duplex); la segunda se ignora.
 
 **Operación propia de ctrllt:** `Terminar`
 
@@ -171,7 +175,7 @@ gesfich -f <tuberia-nombrada> [-b <tuberia-nombrada>] -x <ruta-aralmac>
 
 **Sinopsis:**
 ```
-gesprog -p <tuberia-nombrada> [-q <tuberia-nombrada>] -x <ruta-aralmac>
+gesprog -p <tuberia-nombrada> [-c <tuberia-nombrada>] -x <ruta-aralmac>
 ```
 
 **Identificadores:** `p-XXXX` (ej: `p-0001`)
@@ -198,7 +202,7 @@ ejecutor -e <tuberia-nombrada> [-d <tuberia-nombrada>] -x <ruta-aralmac>
 Implementación: **directorio en el sistema de ficheros**.
 
 - Ficheros: `f-0001.dat`, `f-0002.dat`, ...
-- Programas: `p-0001.json`, `p-0002.json`, ... (metadatos: ejecutable, argumentos, ambiente)
+- Programas: `p-0001.json`, `p-0002.json`, ... (metadatos: `ejecutable`, `args`, `env`)
 
 ---
 
@@ -242,7 +246,7 @@ Los campos son **planos** (no hay objeto `params` anidado). El campo `servicio` 
 ```
 
 ```json
-{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
+{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "args": ["-r"], "env": ["LANG=es_ES.UTF-8"]}
 ```
 
 ```json
@@ -251,11 +255,11 @@ Los campos son **planos** (no hay objeto `params` anidado). El campo `servicio` 
 
 ### 7.2 Estructura de Respuesta
 
-Solo dos campos obligatorios: `estado` y `mensaje`. El resto de campos son planos y opcionales según la operación.
+El único campo obligatorio es `estado`. En caso de éxito se acompañan los datos de la operación (planos); en caso de error se incluye `mensaje`.
 
 **Respuesta exitosa:**
 ```json
-{"estado": "ok", "mensaje": "fichero creado", "id-fichero": "f-0001"}
+{"estado": "ok", "id-fichero": "f-0001"}
 ```
 
 **Respuesta de error:**
@@ -266,8 +270,8 @@ Solo dos campos obligatorios: `estado` y `mensaje`. El resto de campos son plano
 | Campo | Tipo | Valores | Descripción |
 |-------|------|---------|-------------|
 | `estado` | string | `"ok"` / `"error"` | Resultado de la operación |
-| `mensaje` | string | — | Descripción del resultado o del error |
-| (otros) | — | — | Campos adicionales planos según la operación |
+| `mensaje` | string | — | Descripción del error (solo cuando `estado` es `"error"`) |
+| (otros) | — | — | Campos de datos planos según la operación |
 
 ---
 
@@ -283,12 +287,12 @@ Crea un fichero vacío en `aralmac` y retorna su identificador.
 {"servicio": "gesfich", "operacion": "Crear"}
 ```
 ```json
-{"estado": "ok", "mensaje": "fichero creado", "id-fichero": "f-0001"}
+{"estado": "ok", "id-fichero": "f-0001"}
 ```
 
 ---
 
-#### 8.1.2 Leer
+#### 8.1.2 Leer (por identificador)
 
 Retorna el contenido de un fichero existente.
 
@@ -296,7 +300,7 @@ Retorna el contenido de un fichero existente.
 {"servicio": "gesfich", "operacion": "Leer", "id-fichero": "f-0001"}
 ```
 ```json
-{"estado": "ok", "mensaje": "ok", "id-fichero": "f-0001", "contenido": "datos del fichero"}
+{"estado": "ok", "contenido": "datos del fichero"}
 ```
 
 Error:
@@ -306,46 +310,48 @@ Error:
 
 ---
 
-#### 8.1.3 Actualizar
+#### 8.1.3 Leer (listar todos)
 
-Reemplaza el contenido de un fichero con datos provistos por el cliente.
+Si la petición no incluye `id-fichero`, retorna la lista de todos los ficheros registrados.
 
 ```json
-{"servicio": "gesfich", "operacion": "Actualizar", "id-fichero": "f-0001", "contenido": "nuevo contenido"}
+{"servicio": "gesfich", "operacion": "Leer"}
 ```
 ```json
-{"estado": "ok", "mensaje": "fichero actualizado", "id-fichero": "f-0001"}
+{"estado": "ok", "ficheros": ["f-0001", "f-0002"]}
 ```
 
 ---
 
-#### 8.1.4 Borrar
+#### 8.1.4 Actualizar
 
-Elimina un fichero de `aralmac`. Falla si el fichero está en uso por un proceso activo.
+Copia el contenido de un archivo del disco (campo `ruta`) dentro del fichero indicado.
+
+```json
+{"servicio": "gesfich", "operacion": "Actualizar", "id-fichero": "f-0001", "ruta": "/ruta/al/archivo"}
+```
+```json
+{"estado": "ok"}
+```
+
+Errores: `"faltan campos: id-fichero, ruta"`, `"fichero no encontrado"`, `"ruta no encontrada"`.
+
+---
+
+#### 8.1.5 Borrar
+
+Elimina un fichero de `aralmac`.
 
 ```json
 {"servicio": "gesfich", "operacion": "Borrar", "id-fichero": "f-0001"}
 ```
 ```json
-{"estado": "ok", "mensaje": "fichero borrado", "id-fichero": "f-0001"}
+{"estado": "ok"}
 ```
 
-Error (en uso):
+Error:
 ```json
-{"estado": "error", "mensaje": "fichero en uso"}
-```
-
----
-
-#### 8.1.5 Listar
-
-Retorna la lista de todos los ficheros registrados.
-
-```json
-{"servicio": "gesfich", "operacion": "Listar"}
-```
-```json
-{"estado": "ok", "mensaje": "ok", "ficheros": ["f-0001", "f-0002"]}
+{"estado": "error", "mensaje": "fichero no encontrado"}
 ```
 
 ---
@@ -358,10 +364,7 @@ Retorna la lista de todos los ficheros registrados.
 | `Reasumir` | `{"servicio":"gesfich","operacion":"Reasumir"}` | Reanuda el servicio |
 | `Terminar` | `{"servicio":"gesfich","operacion":"Terminar"}` | Termina el servicio |
 
-Error en transición inválida:
-```json
-{"estado": "error", "mensaje": "transicion invalida"}
-```
+Las tres responden `{"estado": "ok"}`. Una transición inválida (p.ej. `Suspender` estando suspendido) responde `{"estado": "error", "mensaje": "transicion invalida"}`.
 
 ---
 
@@ -369,26 +372,28 @@ Error en transición inválida:
 
 #### 8.2.1 Guardar
 
-Registra un nuevo programa en `aralmac`.
+Registra un nuevo programa en `aralmac`. `args` y `env` son opcionales; `env` es una lista de cadenas `"CLAVE=VALOR"`.
 
 ```json
-{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
+{"servicio": "gesprog", "operacion": "Guardar", "ejecutable": "/usr/bin/sort", "args": ["-r"], "env": ["LANG=es_ES.UTF-8"]}
 ```
 ```json
-{"estado": "ok", "mensaje": "programa guardado", "id-programa": "p-0001"}
+{"estado": "ok", "id-programa": "p-0001"}
 ```
+
+Error: `{"estado": "error", "mensaje": "falta campo: ejecutable"}`
 
 ---
 
-#### 8.2.2 Leer
+#### 8.2.2 Leer (por identificador)
 
-Retorna los metadatos de un programa.
+Retorna los metadatos del programa bajo la clave `programa`. El campo `nombre` es el nombre base del ejecutable.
 
 ```json
 {"servicio": "gesprog", "operacion": "Leer", "id-programa": "p-0001"}
 ```
 ```json
-{"estado": "ok", "mensaje": "ok", "id-programa": "p-0001", "ejecutable": "/usr/bin/sort", "argumentos": ["-r"], "ambiente": {"LANG": "es_ES.UTF-8"}}
+{"estado": "ok", "programa": {"id-programa": "p-0001", "nombre": "sort", "args": ["-r"], "env": ["LANG=es_ES.UTF-8"]}}
 ```
 
 Error:
@@ -398,20 +403,35 @@ Error:
 
 ---
 
-#### 8.2.3 Actualizar
+#### 8.2.3 Leer (listar todos)
 
-Actualiza los metadatos de un programa existente.
+Si la petición no incluye `id-programa`, retorna la lista de todos los programas registrados.
 
 ```json
-{"servicio": "gesprog", "operacion": "Actualizar", "id-programa": "p-0001", "ejecutable": "/usr/bin/sort", "argumentos": [], "ambiente": {}}
+{"servicio": "gesprog", "operacion": "Leer"}
 ```
 ```json
-{"estado": "ok", "mensaje": "programa actualizado", "id-programa": "p-0001"}
+{"estado": "ok", "programas": ["p-0001", "p-0002"]}
 ```
 
 ---
 
-#### 8.2.4 Borrar
+#### 8.2.4 Actualizar
+
+Reemplaza la ruta del ejecutable de un programa (campo `ruta`).
+
+```json
+{"servicio": "gesprog", "operacion": "Actualizar", "id-programa": "p-0001", "ruta": "/nueva/ruta"}
+```
+```json
+{"estado": "ok"}
+```
+
+Errores: `"faltan campos: id-programa, ruta"`, `"programa no encontrado"`.
+
+---
+
+#### 8.2.5 Borrar
 
 Elimina un programa de `aralmac`.
 
@@ -419,7 +439,7 @@ Elimina un programa de `aralmac`.
 {"servicio": "gesprog", "operacion": "Borrar", "id-programa": "p-0001"}
 ```
 ```json
-{"estado": "ok", "mensaje": "programa borrado", "id-programa": "p-0001"}
+{"estado": "ok"}
 ```
 
 Error:
@@ -429,26 +449,9 @@ Error:
 
 ---
 
-#### 8.2.5 Listar
-
-Retorna la lista de todos los programas registrados.
-
-```json
-{"servicio": "gesprog", "operacion": "Listar"}
-```
-```json
-{"estado": "ok", "mensaje": "ok", "programas": ["p-0001", "p-0002"]}
-```
-
----
-
 #### 8.2.6 Control de gesprog
 
-| Operación | Efecto |
-|-----------|--------|
-| `Suspender` | Pausa el servicio |
-| `Reasumir` | Reanuda el servicio |
-| `Terminar` | Termina el servicio |
+`Suspender`, `Reasumir` y `Terminar`, con el mismo comportamiento que en gesfich.
 
 ---
 
@@ -456,32 +459,22 @@ Retorna la lista de todos los programas registrados.
 
 #### 8.3.1 Ejecutar
 
-Lanza un proceso de lotes a partir de un programa registrado. Los campos `stdin`, `stdout` y `stderr` son opcionales: si se omiten, el proceso hereda los descriptores del servicio `ejecutor`.
+Lanza un proceso de lotes a partir de un programa registrado. Los campos `stdin`, `stdout` y `stderr` son opcionales (IDs de fichero); si se omiten, el proceso hereda los descriptores del servicio.
 
-La operación es **no bloqueante**: el ejecutor valida, lanza el proceso, y responde de inmediato con el `id-ejecucion`.
+La operación es **no bloqueante**: el ejecutor valida, lanza el proceso y responde de inmediato con el `id-ejecucion`.
 
 ```json
 {"servicio": "ejecutor", "operacion": "Ejecutar", "id-programa": "p-0001", "stdin": "f-0001", "stdout": "f-0002", "stderr": "f-0003"}
 ```
-
-Respuesta inmediata:
 ```json
-{"estado": "ok", "mensaje": "proceso lanzado", "id-ejecucion": "e-0001"}
+{"estado": "ok", "id-ejecucion": "e-0001"}
 ```
 
-Error (programa no existe):
-```json
-{"estado": "error", "mensaje": "programa no encontrado"}
-```
-
-Error (fichero no existe):
-```json
-{"estado": "error", "mensaje": "fichero no encontrado"}
-```
+Errores: `"falta campo: id-programa"`, `"programa no encontrado"`, `"fichero no encontrado"`, `"no se pudo ejecutar el programa"`.
 
 ---
 
-#### 8.3.2 Estado
+#### 8.3.2 Estado (por identificador)
 
 Consulta el estado actual de un proceso.
 
@@ -491,17 +484,12 @@ Consulta el estado actual de un proceso.
 
 Proceso en ejecución:
 ```json
-{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Ejecutando"}
+{"estado": "ok", "id-ejecucion": "e-0001", "id-programa": "p-0001", "proceso-estado": "Ejecutando"}
 ```
 
 Proceso terminado:
 ```json
-{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Terminado", "codigo-salida": 0}
-```
-
-Proceso suspendido:
-```json
-{"estado": "ok", "mensaje": "ok", "id-ejecucion": "e-0001", "estado-proceso": "Suspendido"}
+{"estado": "ok", "id-ejecucion": "e-0001", "id-programa": "p-0001", "proceso-estado": "Terminado", "codigo-salida": 0}
 ```
 
 **Estados posibles de un proceso:** `"Ejecutando"`, `"Suspendido"`, `"Terminado"`.
@@ -510,15 +498,18 @@ El campo `codigo-salida` solo aparece cuando el estado es `"Terminado"`.
 
 ---
 
-#### 8.3.3 Listar
+#### 8.3.3 Estado (todos los procesos)
 
-Retorna todos los procesos conocidos por el ejecutor.
+Si la petición no incluye `id-ejecucion`, retorna el estado de todos los procesos bajo la clave `procesos`.
 
 ```json
-{"servicio": "ejecutor", "operacion": "Listar"}
+{"servicio": "ejecutor", "operacion": "Estado"}
 ```
 ```json
-{"estado": "ok", "mensaje": "ok", "ejecuciones": ["e-0001", "e-0002"]}
+{"estado": "ok", "procesos": [
+  {"id-ejecucion": "e-0001", "id-programa": "p-0001", "proceso-estado": "Ejecutando"},
+  {"id-ejecucion": "e-0002", "id-programa": "p-0002", "proceso-estado": "Terminado", "codigo-salida": 1}
+]}
 ```
 
 ---
@@ -531,13 +522,10 @@ Termina forzadamente un proceso en ejecución.
 {"servicio": "ejecutor", "operacion": "Matar", "id-ejecucion": "e-0001"}
 ```
 ```json
-{"estado": "ok", "mensaje": "proceso terminado", "id-ejecucion": "e-0001"}
+{"estado": "ok"}
 ```
 
-Error:
-```json
-{"estado": "error", "mensaje": "ejecucion no encontrada"}
-```
+Errores: `"proceso no encontrado"`, `"proceso no encontrado o ya terminado"`.
 
 ---
 
@@ -566,12 +554,11 @@ Propagación ordenada de apagado del sistema.
 `ctrllt` ejecuta en orden:
 1. Envía `Terminar` a `gesfich` y `gesprog`
 2. Envía `Parar` a `ejecutor`
-3. Espera confirmación de cada uno
-4. Se apaga
+3. Se apaga
 
 Respuesta al cliente:
 ```json
-{"estado": "ok", "mensaje": "sistema terminando"}
+{"estado": "ok"}
 ```
 
 ---
@@ -634,7 +621,7 @@ Respuesta al cliente:
 
 | Estado | Descripción |
 |--------|-------------|
-| `Corriendo` | Acepta `Ejecutar`, `Estado`, `Listar`, `Matar` |
+| `Corriendo` | Acepta `Ejecutar`, `Estado`, `Matar` |
 | `Suspendido` | No acepta nuevas peticiones; los procesos activos continúan |
 | `Parando` | No acepta nuevos lotes; espera a que los activos terminen |
 | `Terminado` | Todos los procesos terminaron; servicio finalizado |
@@ -665,8 +652,10 @@ Los errores se devuelven siempre con `"estado": "error"` y un `"mensaje"` en esp
 | Situación | `mensaje` |
 |-----------|-----------|
 | Fichero no existe | `"fichero no encontrado"` |
-| Fichero en uso por proceso activo | `"fichero en uso"` |
-| Servicio suspendido o terminado | `"transicion invalida"` |
+| Archivo origen no existe (Actualizar) | `"ruta no encontrada"` |
+| Faltan campos obligatorios | `"faltan campos: ..."` |
+| Operación con el servicio suspendido | `"servicio suspendido"` |
+| Suspender/Reasumir en estado inválido | `"transicion invalida"` |
 | Operación desconocida | `"operacion desconocida"` |
 
 ### Errores de gesprog
@@ -674,7 +663,10 @@ Los errores se devuelven siempre con `"estado": "error"` y un `"mensaje"` en esp
 | Situación | `mensaje` |
 |-----------|-----------|
 | Programa no existe | `"programa no encontrado"` |
-| Servicio suspendido o terminado | `"transicion invalida"` |
+| Falta el ejecutable (Guardar) | `"falta campo: ejecutable"` |
+| Faltan campos obligatorios | `"faltan campos: ..."` |
+| Operación con el servicio suspendido | `"servicio suspendido"` |
+| Suspender/Reasumir en estado inválido | `"transicion invalida"` |
 | Operación desconocida | `"operacion desconocida"` |
 
 ### Errores de ejecutor
@@ -683,8 +675,10 @@ Los errores se devuelven siempre con `"estado": "error"` y un `"mensaje"` en esp
 |-----------|-----------|
 | Programa no existe | `"programa no encontrado"` |
 | Fichero referenciado no existe | `"fichero no encontrado"` |
-| Ejecución no existe | `"ejecucion no encontrada"` |
-| Servicio suspendido/parando | `"transicion invalida"` |
+| Proceso no existe | `"proceso no encontrado"` |
+| No se pudo lanzar el programa | `"no se pudo ejecutar el programa"` |
+| Operación con el servicio suspendido | `"servicio suspendido"` |
+| `Ejecutar` con el servicio parando | `"servicio parando"` |
 | Operación desconocida | `"operacion desconocida"` |
 
 ### Errores de ctrllt
@@ -693,6 +687,4 @@ Los errores se devuelven siempre con `"estado": "error"` y un `"mensaje"` en esp
 |-----------|-----------|
 | Campo `servicio` desconocido | `"servicio desconocido"` |
 | Operación propia desconocida | `"operacion ctrllt desconocida"` |
-| Servicio destino no conectado | `"servicio no conectado"` |
-| Error al enviar al servicio | `"error enviando solicitud al servicio"` |
-| Error al leer respuesta del servicio | `"error leyendo respuesta del servicio"` |
+| Error de comunicación con el servicio | `"error enviando solicitud al servicio"` |
