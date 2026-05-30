@@ -17,19 +17,21 @@ rm -f $TB_GESFICH_REQ $TB_GESFICH_RES \
        $TB_EJECUTOR_REQ $TB_EJECUTOR_RES \
        $TB_CLIENTE_REQ $TB_CLIENTE_RES
 
-echo "Arrancando servicios..."
-
-python3 src/gesfich/gesfich.py -f $TB_GESFICH_REQ -b $TB_GESFICH_RES -x $ARALMAC &
-python3 src/gesprog/gesprog.py -p $TB_GESPROG_REQ -c $TB_GESPROG_RES -x $ARALMAC &
-python3 src/ejecutor/ejecutor.py -e $TB_EJECUTOR_REQ -d $TB_EJECUTOR_RES -x $ARALMAC &
-
-sleep 0.5
+echo "Arrancando ctrllt (crea tuberias)..."
 
 python3 src/ctrllt/ctrllt.py \
   -c $TB_CLIENTE_REQ -a $TB_CLIENTE_RES \
   -f $TB_GESFICH_REQ -b $TB_GESFICH_RES \
   -p $TB_GESPROG_REQ -r $TB_GESPROG_RES \
   -e $TB_EJECUTOR_REQ -d $TB_EJECUTOR_RES &
+
+sleep 0.3
+
+echo "Arrancando servicios..."
+
+python3 src/gesfich/gesfich.py -f $TB_GESFICH_REQ -b $TB_GESFICH_RES -x $ARALMAC &
+python3 src/gesprog/gesprog.py -p $TB_GESPROG_REQ -c $TB_GESPROG_RES -x $ARALMAC &
+python3 src/ejecutor/ejecutor.py -e $TB_EJECUTOR_REQ -d $TB_EJECUTOR_RES -x $ARALMAC &
 
 sleep 0.5
 

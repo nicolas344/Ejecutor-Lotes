@@ -8,6 +8,14 @@ from common import canal
 SERVICIOS = ("gesfich", "gesprog", "ejecutor")
 
 
+def crear_tuberias(*rutas):
+    if sys.platform.startswith("win"):
+        return
+    for ruta in rutas:
+        if not os.path.exists(ruta):
+            os.mkfifo(ruta)
+
+
 def reenviar(con, lock, msg):
     with lock:
         try:
@@ -60,6 +68,14 @@ def main():
     parser.add_argument("-d", required=True, help="res de ejecutor")
     args = parser.parse_args()
 
+    print("[ctrllt] creando tuberias...")
+    crear_tuberias(
+        args.f, args.b,
+        args.p, args.r,
+        args.e, args.d,
+        args.c, args.a,
+    )
+
     print("[ctrllt] conectando a servicios...")
     servicios = {
         "gesfich": canal.cliente(args.f, args.b),
@@ -69,14 +85,28 @@ def main():
     locks = {nombre: threading.Lock() for nombre in servicios}
     print("[ctrllt] listo")
 
-    while True:
-        cli = canal.servidor(args.c, args.a)
-        print("[ctrllt] cliente conectado")
+    shutdown_event = threading.Event()
+    threads = []
+
+    def handle_client(cli):
         terminar = atender(cli, servicios, locks)
         cli.cerrar()
         print("[ctrllt] cliente desconectado")
         if terminar:
+            shutdown_event.set()
+
+    while not shutdown_event.is_set():
+        cli = canal.servidor(args.c, args.a)
+        if shutdown_event.is_set():
+            cli.cerrar()
             break
+        print("[ctrllt] cliente conectado")
+        t = threading.Thread(target=handle_client, args=(cli,), daemon=True)
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join(timeout=2)
 
     for con in servicios.values():
         con.cerrar()
