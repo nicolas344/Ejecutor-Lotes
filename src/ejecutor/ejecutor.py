@@ -165,7 +165,10 @@ def main():
             break
 
         resp = despachar(msg, estado, args.x, procesos, contador)
-        con.enviar(resp)
+        try:
+            con.enviar(resp)
+        except ValueError:
+            con.enviar({"estado": "error", "mensaje": "respuesta demasiado grande"})
 
         if resp["estado"] == "ok":
             op = msg.get("operacion")

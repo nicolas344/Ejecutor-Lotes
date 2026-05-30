@@ -42,8 +42,14 @@ class _CanalFifo:
         self.escritura.flush()
 
     def cerrar(self):
-        self.lectura.close()
-        self.escritura.close()
+        try:
+            self.lectura.close()
+        except Exception:
+            pass
+        try:
+            self.escritura.close()
+        except Exception:
+            pass
 
 
 # --- Windows: named pipe full-duplex (una sola tuberia) ---
